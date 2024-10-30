@@ -1,15 +1,12 @@
 import 'dart:async';
-import 'dart:typed_data';
-import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:pdfx/pdfx.dart';
+import 'package:dio/dio.dart';
+import 'package:path/path.dart' as path;
 
-void main() async {
-  await dotenv.load(fileName: "/home/ideal_pad/Documentos/Projetos/teste_flutter/flutter_application_1/.env");
+void main() {
   runApp(MyApp());
 }
 
@@ -32,12 +29,14 @@ class _StorageListPageState extends State<StorageListPage> {
   List<Map<String, dynamic>> items = [];
   List<Map<String, dynamic>> filteredItems = [];
   bool isListVisible = false;
-  bool isDownloading = false;
   String searchQuery = '';
+  final Dio dio = Dio();
+  Map<String, double> downloadProgress = {};
 
-  final String bucketUrl = dotenv.env['BUCKET_URL'] ?? '';
+  final String bucketUrl = "https://firebasestorage.googleapis.com/v0/b/safeviewbd.appspot.com/o";
 
   Future<void> fetchItems() async {
+    print('Fetching items from: $bucketUrl');
     final response = await http.get(Uri.parse(bucketUrl));
 
     if (response.statusCode == 200) {
@@ -45,7 +44,7 @@ class _StorageListPageState extends State<StorageListPage> {
       final List<Map<String, dynamic>> fetchedItems = List<Map<String, dynamic>>.from(
         data['items'].map((item) => {
           'name': item['name'],
-          'downloadUrl': '$bucketUrl/${Uri.encodeComponent(item['name'])}?alt=media',
+          'downloadUrl': '${bucketUrl}/${Uri.encodeComponent(item['name'])}?alt=media',
         }),
       );
 
@@ -54,36 +53,143 @@ class _StorageListPageState extends State<StorageListPage> {
         filteredItems = fetchedItems;
         isListVisible = true;
       });
+
+      print('Items fetched successfully: ${fetchedItems.length} items');
     } else {
-      print('Erro ao buscar itens: ${response.statusCode}');
+      print('Error fetching items: ${response.statusCode}');
     }
   }
 
   Future<void> downloadFile(String url, String fileName) async {
-    setState(() => isDownloading = true);
+    print('Attempting to download file: $fileName from URL: $url');
     try {
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode == 200) {
-        final directory = await getApplicationDocumentsDirectory();
-        final filePath = '${directory.path}/$fileName';
-        final file = File(filePath);
-        await file.writeAsBytes(response.bodyBytes);
+      dio.options.responseType = ResponseType.bytes;
+      dio.options.headers = {
+        'Accept': 'application/pdf',
+      };
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Arquivo $fileName baixado com sucesso!')),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erro ao baixar o arquivo')),
-        );
+      // Determina o diretório de downloads de acordo com o sistema operacional
+      final downloadsPath = Platform.isWindows
+          ? path.join(Platform.environment['USERPROFILE']!, 'Downloads')
+          : path.join(Platform.environment['HOME']!, 'Downloads');
+
+      String finalFileName = fileName;
+      if (!finalFileName.toLowerCase().endsWith('.pdf')) {
+        finalFileName += '.pdf';
       }
-    } catch (e) {
-      print('Erro ao baixar arquivo: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Erro ao baixar o arquivo')),
+
+      final savePath = path.join(downloadsPath, finalFileName);
+      print('Saving file to: $savePath');
+
+      // Cria o diretório se ele não existir
+      final fileDir = Directory(downloadsPath);
+      if (!fileDir.existsSync()) {
+        fileDir.createSync(recursive: true);
+      }
+
+      if (await File(savePath).exists()) {
+        print('File already exists: $savePath');
+        final shouldOverwrite = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text('Arquivo já existe'),
+            content: Text('O arquivo "$finalFileName" já existe. Deseja sobrescrever?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: Text('Cancelar'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: Text('Sobrescrever'),
+              ),
+            ],
+          ),
+        );
+
+        if (shouldOverwrite != true) {
+          print('User chose not to overwrite the file');
+          return;
+        }
+      }
+
+      setState(() {
+        downloadProgress[fileName] = 0;
+      });
+
+      final response = await dio.get(
+        url,
+        onReceiveProgress: (received, total) {
+          if (total != -1) {
+            setState(() {
+              downloadProgress[fileName] = (received / total * 100);
+            });
+          }
+        },
       );
-    } finally {
-      setState(() => isDownloading = false);
+
+      if (response.data == null || response.data.isEmpty) {
+        throw Exception('Arquivo vazio ou inválido');
+      }
+
+      final file = File(savePath);
+      await file.writeAsBytes(response.data);
+
+      setState(() {
+        downloadProgress.remove(fileName);
+      });
+
+      print('Download completed: $finalFileName saved at $savePath');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.white),
+              SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('Download concluído'),
+                    Text(
+                      'Salvo em: $savePath',
+                      style: TextStyle(fontSize: 12),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              TextButton(
+                onPressed: () async {
+                  final directory = File(savePath).parent;
+                  // Usa 'explorer' no Windows e 'xdg-open' no Linux
+                  if (Platform.isWindows) {
+                    await Process.run('explorer', [directory.path]);
+                  } else if (Platform.isLinux) {
+                    await Process.run('xdg-open', [directory.path]);
+                  }
+                },
+                child: Text('ABRIR PASTA', style: TextStyle(color: Colors.white)),
+              ),
+            ],
+          ),
+          duration: Duration(seconds: 5),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      setState(() {
+        downloadProgress.remove(fileName);
+      });
+
+      print('Error downloading file: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Erro ao fazer download: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 
@@ -95,6 +201,7 @@ class _StorageListPageState extends State<StorageListPage> {
               item['name'].toLowerCase().contains(query.toLowerCase()))
           .toList();
     });
+    print('Filtered items with query: $query, found: ${filteredItems.length}');
   }
 
   void toggleListVisibility() {
@@ -103,26 +210,52 @@ class _StorageListPageState extends State<StorageListPage> {
         isListVisible = false;
         filteredItems = [];
       });
+      print('List is now hidden');
     } else {
       fetchItems();
+      print('List is now visible');
     }
   }
 
-  void openFileContent(String downloadUrl, String fileName) async {
-    final response = await http.get(Uri.parse(downloadUrl));
-    if (response.statusCode == 200) {
-      final fileData = response.bodyBytes;
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => FileContentScreen(fileName: fileName, fileData: fileData),
+  Widget buildDownloadButton(Map<String, dynamic> item) {
+    final fileName = item['name'];
+    final progress = downloadProgress[fileName];
+
+    if (progress != null) {
+      return Container(
+        width: 50,
+        height: 50,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            CircularProgressIndicator(
+              value: progress / 100,
+              backgroundColor: Colors.grey[800],
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+              strokeWidth: 3,
+            ),
+            Text(
+              '${progress.toInt()}%',
+              style: TextStyle(fontSize: 10),
+            ),
+          ],
         ),
       );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Erro ao carregar conteúdo do arquivo')),
-      );
     }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          icon: Icon(Icons.download, color: Colors.blue),
+          onPressed: () => downloadFile(
+            item['downloadUrl'],
+            fileName,
+          ),
+          tooltip: 'Download arquivo',
+        ),
+      ],
+    );
   }
 
   @override
@@ -176,24 +309,14 @@ class _StorageListPageState extends State<StorageListPage> {
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: ListTile(
-                            leading: getFileIcon(item['name']),
-                            title: GestureDetector(
-                              onTap: () => openFileContent(item['downloadUrl'], item['name']),
-                              child: Text(
-                                item['name'],
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.blue,
-                                  decoration: TextDecoration.underline,
-                                ),
+                            title: Text(
+                              item['name'],
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                color: Colors.blue,
                               ),
                             ),
-                            trailing: isDownloading
-                                ? CircularProgressIndicator()
-                                : TextButton(
-                                    onPressed: () => downloadFile(item['downloadUrl'], item['name']),
-                                    child: Text('Download'),
-                                  ),
+                            trailing: buildDownloadButton(item),
                           ),
                         );
                       },
@@ -207,67 +330,6 @@ class _StorageListPageState extends State<StorageListPage> {
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  Icon getFileIcon(String fileName) {
-    if (fileName.toLowerCase().endsWith('.pdf')) {
-      return Icon(Icons.picture_as_pdf, color: Colors.red);
-    } else if (fileName.toLowerCase().endsWith('.jpg') ||
-               fileName.toLowerCase().endsWith('.jpeg') ||
-               fileName.toLowerCase().endsWith('.png') ||
-               fileName.toLowerCase().endsWith('.gif')) {
-      return Icon(Icons.image, color: Colors.blue);
-    } else {
-      return Icon(Icons.insert_drive_file, color: Colors.grey);
-    }
-  }
-}
-
-class FileContentScreen extends StatelessWidget {
-  final String fileName;
-  final List<int> fileData;
-
-  FileContentScreen({required this.fileName, required this.fileData});
-
-  bool get isSupportedPlatform => Platform.isAndroid || Platform.isIOS || Platform.isWindows;
-
-  @override
-  Widget build(BuildContext context) {
-    bool isImage = fileName.toLowerCase().endsWith('.jpg') ||
-                   fileName.toLowerCase().endsWith('.jpeg') ||
-                   fileName.toLowerCase().endsWith('.png') ||
-                   fileName.toLowerCase().endsWith('.gif');
-
-    bool isText = fileName.toLowerCase().endsWith('.txt');
-    bool isPdf = fileName.toLowerCase().endsWith('.pdf');
-
-    return Scaffold(
-      appBar: AppBar(title: Text(fileName)),
-      body: Center(
-        child: isImage
-            ? Image.memory(Uint8List.fromList(fileData))
-            : isText
-                ? Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: SingleChildScrollView(
-                      child: Text(
-                        utf8.decode(fileData),
-                        style: TextStyle(fontSize: 16, color: Colors.white),
-                      ),
-                    ),
-                  )
-                : isPdf && isSupportedPlatform
-                    ? PdfViewPinch(
-                        controller: PdfControllerPinch(
-                          document: PdfDocument.openData(fileData as FutureOr<Uint8List>),
-                        ),
-                      )
-                    : Text(
-                        isPdf ? 'Visualização de PDF não suportada neste dispositivo' : 'Formato de arquivo não suportado',
-                        style: TextStyle(color: Colors.white),
-                      ),
       ),
     );
   }
