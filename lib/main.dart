@@ -27,36 +27,202 @@ class StorageListPage extends StatefulWidget {
 
 class _StorageListPageState extends State<StorageListPage> {
   List<Map<String, dynamic>> items = [];
-  List<Map<String, dynamic>> filteredItems = [];
   bool isListVisible = false;
+  final Dio dio = Dio();
+
+  final String bucketUrl = "https://firebasestorage.googleapis.com/v0/b/safeviewbd.appspot.com/o";
+
+  Future<void> fetchItems() async {
+    print('Fetching folders from: $bucketUrl');
+    final response = await http.get(Uri.parse('$bucketUrl?prefix='));
+
+    if (response.statusCode == 200) {
+      final List<Map<String, dynamic>> fetchedItems = [
+        {'name': 'Faces'},
+        {'name': 'Reports'},
+      ];
+
+      setState(() {
+        items = fetchedItems;
+        isListVisible = true;
+      });
+
+      print('Folders fetched successfully: ${fetchedItems.length} folders');
+    } else {
+      print('Error fetching folders: ${response.statusCode}');
+    }
+  }
+
+  void toggleListVisibility() {
+    if (isListVisible) {
+      setState(() {
+        isListVisible = false;
+      });
+      print('List is now hidden');
+    } else {
+      fetchItems();
+      print('List is now visible');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Row(
+          children: [
+            Icon(Icons.storage, color: Colors.white),
+            SizedBox(width: 8),
+            Text('Pastas no Bucket Firebase'),
+          ],
+        ),
+      ),
+      body: Container(
+        color: Colors.black,
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          children: [
+            ElevatedButton(
+              onPressed: toggleListVisibility,
+              style: ElevatedButton.styleFrom(
+                padding: EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+                elevation: 2,
+              ),
+              child: Text(isListVisible ? 'Ocultar Pastas do Bucket' : 'Mostrar Pastas do Bucket'),
+            ),
+            SizedBox(height: 12),
+            Expanded(
+              child: isListVisible
+                  ? ListView.builder(
+                      itemCount: items.length,
+                      itemBuilder: (context, index) {
+                        final folder = items[index]['name'];
+                        return Card(
+                          elevation: 4,
+                          margin: EdgeInsets.symmetric(vertical: 6),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: ListTile(
+                            title: Text(
+                              folder,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                color: Colors.blue,
+                              ),
+                            ),
+                            trailing: Icon(Icons.folder, color: Colors.blue),
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => FolderContentsPage(folder: folder),
+                                ),
+                              );
+                            },
+                          ),
+                        );
+                      },
+                    )
+                  : Center(
+                      child: Text(
+                        'Pressione "Mostrar" para exibir as pastas',
+                        style: TextStyle(color: Colors.grey.shade600),
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class FolderContentsPage extends StatefulWidget {
+  final String folder;
+
+  FolderContentsPage({required this.folder});
+
+  @override
+  _FolderContentsPageState createState() => _FolderContentsPageState();
+}
+
+class _FolderContentsPageState extends State<FolderContentsPage> {
+  List<Map<String, dynamic>> folderItems = [];
+  List<Map<String, dynamic>> filteredFolderItems = [];
   String searchQuery = '';
   final Dio dio = Dio();
   Map<String, double> downloadProgress = {};
 
   final String bucketUrl = "https://firebasestorage.googleapis.com/v0/b/safeviewbd.appspot.com/o";
 
-  Future<void> fetchItems() async {
-    print('Fetching items from: $bucketUrl');
-    final response = await http.get(Uri.parse(bucketUrl));
+  @override
+  void initState() {
+    super.initState();
+    fetchFolderContents();
+  }
+
+  Future<void> fetchFolderContents() async {
+    final folderUrl = "$bucketUrl?prefix=${widget.folder}/";
+    final response = await http.get(Uri.parse(folderUrl));
 
     if (response.statusCode == 200) {
       final data = json.decode(response.body);
       final List<Map<String, dynamic>> fetchedItems = List<Map<String, dynamic>>.from(
         data['items'].map((item) => {
-          'name': item['name'],
+          'name': item['name'].replaceFirst('${widget.folder}/', ''),
           'downloadUrl': '${bucketUrl}/${Uri.encodeComponent(item['name'])}?alt=media',
         }),
       );
 
       setState(() {
-        items = fetchedItems;
-        filteredItems = fetchedItems;
-        isListVisible = true;
+        folderItems = fetchedItems;
+        filteredFolderItems = fetchedItems;
       });
-
-      print('Items fetched successfully: ${fetchedItems.length} items');
     } else {
-      print('Error fetching items: ${response.statusCode}');
+      print('Error fetching folder contents: ${response.statusCode}');
+    }
+  }
+
+  void filterItems(String query) {
+    setState(() {
+      searchQuery = query;
+      filteredFolderItems = folderItems
+          .where((item) =>
+              item['name'].toLowerCase().contains(query.toLowerCase()))
+          .toList();
+    });
+    print('Filtered items with query: $query, found: ${filteredFolderItems.length}');
+  }
+
+  Future<void> deleteFile(String fileName) async {
+    print('Attempting to delete file: $fileName');
+    try {
+      final fileUrl = "$bucketUrl/${Uri.encodeComponent('${widget.folder}/$fileName')}";
+      final response = await dio.delete(fileUrl);
+
+      if (response.statusCode == 200 || response.statusCode == 204) {
+        setState(() {
+          folderItems.removeWhere((item) => item['name'] == fileName);
+          filteredFolderItems.removeWhere((item) => item['name'] == fileName);
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('File "$fileName" deleted successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        throw Exception('Failed to delete file');
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error deleting file: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 
@@ -68,27 +234,21 @@ class _StorageListPageState extends State<StorageListPage> {
         'Accept': 'application/pdf',
       };
 
-      // Determina o diretório de downloads de acordo com o sistema operacional
       final downloadsPath = Platform.isWindows
           ? path.join(Platform.environment['USERPROFILE']!, 'Downloads')
           : path.join(Platform.environment['HOME']!, 'Downloads');
 
       String finalFileName = fileName;
-      if (!finalFileName.toLowerCase().endsWith('.pdf')) {
-        finalFileName += '.pdf';
-      }
-
+      
       final savePath = path.join(downloadsPath, finalFileName);
       print('Saving file to: $savePath');
 
-      // Cria o diretório se ele não existir
       final fileDir = Directory(downloadsPath);
       if (!fileDir.existsSync()) {
         fileDir.createSync(recursive: true);
       }
 
       if (await File(savePath).exists()) {
-        print('File already exists: $savePath');
         final shouldOverwrite = await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
@@ -108,7 +268,6 @@ class _StorageListPageState extends State<StorageListPage> {
         );
 
         if (shouldOverwrite != true) {
-          print('User chose not to overwrite the file');
           return;
         }
       }
@@ -139,7 +298,6 @@ class _StorageListPageState extends State<StorageListPage> {
         downloadProgress.remove(fileName);
       });
 
-      print('Download completed: $finalFileName saved at $savePath');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Row(
@@ -163,7 +321,6 @@ class _StorageListPageState extends State<StorageListPage> {
               TextButton(
                 onPressed: () async {
                   final directory = File(savePath).parent;
-                  // Usa 'explorer' no Windows e 'xdg-open' no Linux
                   if (Platform.isWindows) {
                     await Process.run('explorer', [directory.path]);
                   } else if (Platform.isLinux) {
@@ -183,37 +340,12 @@ class _StorageListPageState extends State<StorageListPage> {
         downloadProgress.remove(fileName);
       });
 
-      print('Error downloading file: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Erro ao fazer download: $e'),
           backgroundColor: Colors.red,
         ),
       );
-    }
-  }
-
-  void filterItems(String query) {
-    setState(() {
-      searchQuery = query;
-      filteredItems = items
-          .where((item) =>
-              item['name'].toLowerCase().contains(query.toLowerCase()))
-          .toList();
-    });
-    print('Filtered items with query: $query, found: ${filteredItems.length}');
-  }
-
-  void toggleListVisibility() {
-    if (isListVisible) {
-      setState(() {
-        isListVisible = false;
-        filteredItems = [];
-      });
-      print('List is now hidden');
-    } else {
-      fetchItems();
-      print('List is now visible');
     }
   }
 
@@ -248,11 +380,13 @@ class _StorageListPageState extends State<StorageListPage> {
       children: [
         IconButton(
           icon: Icon(Icons.download, color: Colors.blue),
-          onPressed: () => downloadFile(
-            item['downloadUrl'],
-            fileName,
-          ),
+          onPressed: () => downloadFile(item['downloadUrl'], fileName),
           tooltip: 'Download arquivo',
+        ),
+        IconButton(
+          icon: Icon(Icons.delete, color: Colors.red),
+          onPressed: () => deleteFile(fileName),
+          tooltip: 'Delete arquivo',
         ),
       ],
     );
@@ -262,20 +396,13 @@ class _StorageListPageState extends State<StorageListPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Row(
-          children: [
-            Icon(Icons.storage, color: Colors.white),
-            SizedBox(width: 8),
-            Text('Itens do Bucket Firebase'),
-          ],
-        ),
+        title: Text('Conteúdo de ${widget.folder}'),
       ),
-      body: Container(
-        color: Colors.black,
-        padding: const EdgeInsets.all(12.0),
-        child: Column(
-          children: [
-            TextField(
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: TextField(
               onChanged: filterItems,
               decoration: InputDecoration(
                 labelText: 'Pesquisar',
@@ -286,50 +413,20 @@ class _StorageListPageState extends State<StorageListPage> {
               ),
               style: TextStyle(color: Colors.black),
             ),
-            SizedBox(height: 12),
-            ElevatedButton(
-              onPressed: toggleListVisibility,
-              style: ElevatedButton.styleFrom(
-                padding: EdgeInsets.symmetric(vertical: 12, horizontal: 20),
-                elevation: 2,
-              ),
-              child: Text(isListVisible ? 'Ocultar Itens do Bucket' : 'Mostrar Itens do Bucket'),
+          ),
+          Expanded(
+            child: ListView.builder(
+              itemCount: filteredFolderItems.length,
+              itemBuilder: (context, index) {
+                final item = filteredFolderItems[index];
+                return ListTile(
+                  title: Text(item['name']),
+                  trailing: buildDownloadButton(item),
+                );
+              },
             ),
-            SizedBox(height: 12),
-            Expanded(
-              child: isListVisible
-                  ? ListView.builder(
-                      itemCount: filteredItems.length,
-                      itemBuilder: (context, index) {
-                        final item = filteredItems[index];
-                        return Card(
-                          elevation: 4,
-                          margin: EdgeInsets.symmetric(vertical: 6),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: ListTile(
-                            title: Text(
-                              item['name'],
-                              style: TextStyle(
-                                fontWeight: FontWeight.w600,
-                                color: Colors.blue,
-                              ),
-                            ),
-                            trailing: buildDownloadButton(item),
-                          ),
-                        );
-                      },
-                    )
-                  : Center(
-                      child: Text(
-                        'Pressione "Mostrar" para exibir os itens',
-                        style: TextStyle(color: Colors.grey.shade600),
-                      ),
-                    ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
